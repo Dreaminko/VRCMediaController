@@ -7,10 +7,8 @@ import customtkinter as ctk
 import pystray
 from PIL import Image
 
-import i18n
-import media_control
-import osc_runner
-from config import config_manager
+from core import i18n, media_control, osc_runner
+from core.config import config_manager
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -30,7 +28,7 @@ class App(ctk.CTk):
         self.lang_code = config_manager.get("language") or "en"
 
         self.title(i18n.get_text(self.lang_code, "title"))
-        self.geometry("450x360")
+        self.geometry("450x440")
         self.resizable(False, False)
 
         # Set AppUserModelID so Windows taskbar shows the correct icon
@@ -104,6 +102,52 @@ class App(ctk.CTk):
         self.format_entry.insert(0, config_manager.get("chatbox_format"))
         self.format_entry.pack(pady=5, padx=10, fill="x")
         self.format_entry.bind("<KeyRelease>", self.on_format_changed)
+
+        # --- Display Mode ---
+        self.display_mode_label = ctk.CTkLabel(
+            self.settings_frame,
+            text=i18n.get_text(self.lang_code, "display_mode_label"),
+            anchor="w",
+        )
+        self.display_mode_label.pack(anchor="w", padx=10, pady=(8, 2))
+
+        # Build name <-> key map for current language
+        self._mode_options_map = {
+            "persistent": i18n.get_text(self.lang_code, "display_mode_persistent"),
+            "timed": i18n.get_text(self.lang_code, "display_mode_timed"),
+        }
+        current_mode = config_manager.get("chatbox_display_mode") or "persistent"
+
+        self.display_mode_seg = ctk.CTkSegmentedButton(
+            self.settings_frame,
+            values=list(self._mode_options_map.values()),
+            command=self.on_display_mode_changed,
+        )
+        self.display_mode_seg.set(self._mode_options_map[current_mode])
+        self.display_mode_seg.pack(anchor="w", padx=10, pady=(0, 4))
+
+        # Duration row (label + slider), always in the layout
+        self.duration_frame = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        self.duration_frame.pack(anchor="w", padx=10, fill="x", pady=(0, 6))
+
+        self.duration_title_label = ctk.CTkLabel(self.duration_frame, text="")
+        self.duration_title_label.pack(side="left")
+
+        current_duration = config_manager.get("chatbox_display_duration") or 10
+        self.duration_slider = ctk.CTkSlider(
+            self.duration_frame,
+            from_=5,
+            to=60,
+            number_of_steps=11,  # 5, 10, 15 … 60
+            command=self.on_duration_changed,
+            width=190,
+        )
+        self.duration_slider.set(current_duration)
+        self.duration_slider.pack(side="left", padx=(8, 0))
+
+        # Initialise label text and enable/disable state
+        self._update_duration_label()
+        self._apply_duration_frame_state(current_mode)
 
         # Language Selection
         self.lang_combo = ctk.CTkComboBox(
@@ -235,6 +279,19 @@ class App(ctk.CTk):
         )
         self.format_label.configure(text=i18n.get_text(self.lang_code, "format_label"))
 
+        # Refresh display-mode section
+        self.display_mode_label.configure(
+            text=i18n.get_text(self.lang_code, "display_mode_label")
+        )
+        self._mode_options_map = {
+            "persistent": i18n.get_text(self.lang_code, "display_mode_persistent"),
+            "timed": i18n.get_text(self.lang_code, "display_mode_timed"),
+        }
+        self.display_mode_seg.configure(values=list(self._mode_options_map.values()))
+        current_mode = config_manager.get("chatbox_display_mode") or "persistent"
+        self.display_mode_seg.set(self._mode_options_map[current_mode])
+        self._update_duration_label()
+
         # Rebuild tray menu with updated language
         if self.tray_icon is not None:
             self.tray_icon.menu = self._build_tray_menu()
@@ -244,6 +301,49 @@ class App(ctk.CTk):
             self.on_media_update(self._current_raw_track)
         else:
             self.current_track = self._no_media_text
+
+    # ------------------------------------------------------------------
+    # Display-mode helpers
+    # ------------------------------------------------------------------
+
+    def _apply_duration_frame_state(self, mode):
+        """Enable or visually dim the duration controls based on display mode."""
+        if mode == "timed":
+            self.duration_slider.configure(state="normal")
+            self.duration_title_label.configure(text_color=("gray10", "gray90"))
+        else:
+            self.duration_slider.configure(state="disabled")
+            self.duration_title_label.configure(text_color=("gray50", "gray60"))
+
+    def _update_duration_label(self):
+        """Refresh the duration label to show the current slider value."""
+        val = int(round(self.duration_slider.get()))
+        tmpl = i18n.get_text(self.lang_code, "display_duration_label")
+        self.duration_title_label.configure(text=tmpl.replace("{n}", str(val)))
+
+    def on_display_mode_changed(self, choice):
+        """Called when the user clicks a segment on the display-mode button."""
+        # Map localised label back to internal key
+        mode = "persistent"
+        for key, label in self._mode_options_map.items():
+            if label == choice:
+                mode = key
+                break
+        config_manager.set("chatbox_display_mode", mode)
+        self._apply_duration_frame_state(mode)
+        self._update_duration_label()
+
+        # Re-apply the new mode to whatever is currently showing in the chatbox
+        if self.current_track != self._no_media_text and config_manager.get(
+            "chatbox_enabled"
+        ):
+            osc_runner.send_chatbox(self.current_track)
+
+    def on_duration_changed(self, value):
+        """Called as the user drags the duration slider."""
+        val = int(round(value))
+        config_manager.set("chatbox_display_duration", val)
+        self._update_duration_label()
 
     # ------------------------------------------------------------------
     # Event handlers
@@ -298,6 +398,9 @@ class App(ctk.CTk):
 
             if self.current_track != self._no_media_text:
                 osc_runner.send_chatbox(self.current_track)
+            else:
+                # Media stopped — cancel any running display timer and clear chatbox.
+                osc_runner.clear_chatbox()
 
         self.after(500, self.update_ui)
 

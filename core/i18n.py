@@ -13,6 +13,10 @@ TRANSLATIONS = {
         "tray_show": "Show",
         "tray_quit": "Quit",
         "tray_tooltip": "VRCMediaController",
+        "display_mode_label": "Chatbox Display Mode:",
+        "display_mode_persistent": "Always On",
+        "display_mode_timed": "Timed",
+        "display_duration_label": "Duration: {n}s",
     },
     "zh": {
         "title": "VRChat 媒体控制器 (VRCMediaController)",
@@ -28,6 +32,10 @@ TRANSLATIONS = {
         "tray_show": "显示窗口",
         "tray_quit": "退出",
         "tray_tooltip": "VRChat 媒体控制器",
+        "display_mode_label": "聊天框显示方式：",
+        "display_mode_persistent": "持续显示",
+        "display_mode_timed": "定时显示",
+        "display_duration_label": "显示时长：{n} 秒",
     },
     "ja": {
         "title": "VRChat メディアコントローラー",
@@ -43,6 +51,10 @@ TRANSLATIONS = {
         "tray_show": "ウィンドウを表示",
         "tray_quit": "終了",
         "tray_tooltip": "VRChat メディアコントローラー",
+        "display_mode_label": "表示モード：",
+        "display_mode_persistent": "常時表示",
+        "display_mode_timed": "タイマー表示",
+        "display_duration_label": "表示時間：{n}秒",
     },
 }
 

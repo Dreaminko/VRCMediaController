@@ -8,6 +8,8 @@ DEFAULT_CONFIG = {
     "chatbox_format": "🎵 {name} - {artist}",
     "chatbox_enabled": True,
     "language": "en",
+    "chatbox_display_mode": "persistent",  # "persistent" or "timed"
+    "chatbox_display_duration": 10,  # seconds, used when mode is "timed"
 }
 
 
