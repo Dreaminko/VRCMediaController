@@ -58,6 +58,7 @@ class App(ctk.CTk):
         self._current_raw_track = None
         self._osc_ok = False
         self.tray_icon = None
+        self._quitting = False
 
         # --- UI SETUP ---
 
@@ -197,10 +198,14 @@ class App(ctk.CTk):
 
     def _quit_app(self):
         """Fully exit the application (called from tray menu)."""
+        self._quitting = True
         config_manager._save_internal()
+        osc_runner.stop_osc()
+        media_control.stop_media_polling()
         if self.tray_icon is not None:
             self.tray_icon.stop()
         self.destroy()
+        os._exit(0)
 
     # ------------------------------------------------------------------
     # Language helpers
@@ -285,6 +290,8 @@ class App(ctk.CTk):
 
     def update_ui(self):
         """Polled by the main thread to sync UI state and send OSC updates."""
+        if self._quitting:
+            return
         if self.current_track != self.last_track:
             self.last_track = self.current_track
             self.track_label.configure(text=self.current_track)

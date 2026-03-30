@@ -210,8 +210,27 @@ def start_media_polling(callback):
         global _event_loop
         _event_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(_event_loop)
-        _event_loop.run_until_complete(_monitoring_loop(callback))
+        try:
+            _event_loop.run_until_complete(_monitoring_loop(callback))
+        except Exception:
+            pass
+        finally:
+            try:
+                _event_loop.close()
+            except Exception:
+                pass
 
     thread = threading.Thread(target=_run_loop, daemon=True, name="MediaPoller")
     thread.start()
     return thread
+
+
+def stop_media_polling():
+    """Stops the asyncio event loop used for media monitoring."""
+    global _event_loop
+    if _event_loop is not None and _event_loop.is_running():
+        try:
+            _event_loop.call_soon_threadsafe(_event_loop.stop)
+            print("[MediaControl] Event loop stop requested.")
+        except Exception as e:
+            print(f"[MediaControl] Error stopping event loop: {e}")

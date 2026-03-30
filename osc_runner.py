@@ -89,6 +89,17 @@ def start_osc():
     return True
 
 
+def stop_osc():
+    """Shuts down the OSC server cleanly."""
+    global _server
+    if _server is not None:
+        try:
+            _server.shutdown()
+            print("[OSC Server] Shut down.")
+        except Exception as e:
+            print(f"[OSC Server] Error during shutdown: {e}")
+
+
 def send_chatbox(text):
     """Sends a formatted string to VRChat chatbox via OSC."""
     if not config_manager.get("chatbox_enabled"):
