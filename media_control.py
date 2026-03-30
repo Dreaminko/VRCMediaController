@@ -1,7 +1,7 @@
 import asyncio
 import threading
 import traceback
-import winsdk.windows.media.control as wmc
+import winrt.windows.media.control as wmc
 
 # Keep a reference to the active loop for threading interactions
 _event_loop = None
