@@ -73,7 +73,11 @@ class App(ctk.CTk):
 
         # Track Label
         self.track_label = ctk.CTkLabel(
-            self, text=self.current_track, font=("Arial", 16)
+            self,
+            text=self.current_track,
+            font=("Arial", 16),
+            wraplength=410,
+            justify="center",
         )
         self.track_label.pack(pady=10)
 
@@ -145,9 +149,10 @@ class App(ctk.CTk):
         self.duration_slider.set(current_duration)
         self.duration_slider.pack(side="left", padx=(8, 0))
 
-        # Initialise label text and enable/disable state
+        # Initialise label text; hide duration row if not in timed mode
         self._update_duration_label()
-        self._apply_duration_frame_state(current_mode)
+        if current_mode != "timed":
+            self.duration_frame.pack_forget()
 
         # Language Selection
         self.lang_combo = ctk.CTkComboBox(
@@ -306,14 +311,15 @@ class App(ctk.CTk):
     # Display-mode helpers
     # ------------------------------------------------------------------
 
-    def _apply_duration_frame_state(self, mode):
-        """Enable or visually dim the duration controls based on display mode."""
-        if mode == "timed":
-            self.duration_slider.configure(state="normal")
-            self.duration_title_label.configure(text_color=("gray10", "gray90"))
-        else:
-            self.duration_slider.configure(state="disabled")
-            self.duration_title_label.configure(text_color=("gray50", "gray60"))
+    def _show_duration_frame(self):
+        """Insert the duration row between the segmented button and lang combo."""
+        self.lang_combo.pack_forget()
+        self.duration_frame.pack(anchor="w", padx=10, fill="x", pady=(0, 6))
+        self.lang_combo.pack(pady=10, padx=10, anchor="w")
+
+    def _hide_duration_frame(self):
+        """Remove the duration row from the layout."""
+        self.duration_frame.pack_forget()
 
     def _update_duration_label(self):
         """Refresh the duration label to show the current slider value."""
@@ -330,8 +336,10 @@ class App(ctk.CTk):
                 mode = key
                 break
         config_manager.set("chatbox_display_mode", mode)
-        self._apply_duration_frame_state(mode)
-        self._update_duration_label()
+        if mode == "timed":
+            self._show_duration_frame()
+        else:
+            self._hide_duration_frame()
 
         # Re-apply the new mode to whatever is currently showing in the chatbox
         if self.current_track != self._no_media_text and config_manager.get(
