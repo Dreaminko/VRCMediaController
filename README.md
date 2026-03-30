@@ -1,6 +1,6 @@
 # VRChat Media Controller / VRChat 媒体控制器 / VRChat メディアコントローラー
 
-![LOGO](logo.png)
+![banner](images/banner.png)
 
 [English](#english) | [中文](#中文) | [日本語](#日本語)
 
