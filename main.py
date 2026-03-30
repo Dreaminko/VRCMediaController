@@ -1,8 +1,11 @@
 import ctypes
 import os
 import sys
+import threading
 
 import customtkinter as ctk
+import pystray
+from PIL import Image
 
 import i18n
 import media_control
@@ -42,14 +45,11 @@ class App(ctk.CTk):
         if os.path.exists(icon_path):
             try:
                 self.iconbitmap(icon_path)
-                # Sometimes customtkinter needs this on window load to stick reliably
                 self.after(200, lambda: self.iconbitmap(icon_path))
             except Exception as e:
                 print(f"Could not load icon: {e}")
 
         # --- Cached i18n strings ---
-        # Stored so update_ui / on_toggle_chatbox never call i18n.get_text() in a
-        # tight loop — they just reference these attributes instead.
         self._no_media_text = i18n.get_text(self.lang_code, "no_media")
 
         # State Variables
@@ -57,6 +57,7 @@ class App(ctk.CTk):
         self.last_track = ""
         self._current_raw_track = None
         self._osc_ok = False
+        self.tray_icon = None
 
         # --- UI SETUP ---
 
@@ -130,11 +131,76 @@ class App(ctk.CTk):
         # Start Media Monitoring Component
         media_control.start_media_polling(self.on_media_update)
 
-        # Start UI updater — 500 ms is plenty; real-time updates come via callback
+        # Start UI updater
         self.after(500, self.update_ui)
 
-        # Override close to flush pending config save
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Setup system tray icon
+        self._setup_tray()
+
+        # Override close button to hide to tray
+        self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+
+    # ------------------------------------------------------------------
+    # System tray
+    # ------------------------------------------------------------------
+
+    def _build_tray_menu(self):
+        """Build the pystray menu using current language strings."""
+
+        def on_show(icon, item):
+            self.after(0, self._show_window)
+
+        def on_quit(icon, item):
+            self.after(0, self._quit_app)
+
+        return pystray.Menu(
+            pystray.MenuItem(
+                i18n.get_text(self.lang_code, "tray_show"),
+                on_show,
+                default=True,
+            ),
+            pystray.MenuItem(
+                i18n.get_text(self.lang_code, "tray_quit"),
+                on_quit,
+            ),
+        )
+
+    def _setup_tray(self):
+        """Create and start the system tray icon in a background daemon thread."""
+        icon_path = get_resource_path("fav.ico")
+        try:
+            image = Image.open(icon_path)
+        except Exception:
+            # Fallback: plain blue square
+            image = Image.new("RGB", (64, 64), color=(100, 149, 237))
+
+        tooltip = i18n.get_text(self.lang_code, "tray_tooltip")
+        self.tray_icon = pystray.Icon(
+            "VRCMediaController",
+            image,
+            tooltip,
+            self._build_tray_menu(),
+        )
+
+        tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+        tray_thread.start()
+
+    def hide_to_tray(self):
+        """Hide the main window to the system tray (called by X button)."""
+        self.withdraw()
+
+    def _show_window(self):
+        """Restore the main window from the system tray."""
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def _quit_app(self):
+        """Fully exit the application (called from tray menu)."""
+        config_manager._save_internal()
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+        self.destroy()
 
     # ------------------------------------------------------------------
     # Language helpers
@@ -147,7 +213,7 @@ class App(ctk.CTk):
         self.apply_language()
 
     def apply_language(self):
-        # Refresh cached no_media string first so all subsequent comparisons are correct
+        # Refresh cached no_media string first
         self._no_media_text = i18n.get_text(self.lang_code, "no_media")
 
         self.title(i18n.get_text(self.lang_code, "title"))
@@ -163,6 +229,11 @@ class App(ctk.CTk):
             text=i18n.get_text(self.lang_code, "enable_chatbox")
         )
         self.format_label.configure(text=i18n.get_text(self.lang_code, "format_label"))
+
+        # Rebuild tray menu with updated language
+        if self.tray_icon is not None:
+            self.tray_icon.menu = self._build_tray_menu()
+            self.tray_icon.title = i18n.get_text(self.lang_code, "tray_tooltip")
 
         if self._current_raw_track:
             self.on_media_update(self._current_raw_track)
@@ -218,21 +289,10 @@ class App(ctk.CTk):
             self.last_track = self.current_track
             self.track_label.configure(text=self.current_track)
 
-            # Only send chatbox OSC message when there is an actual track playing
             if self.current_track != self._no_media_text:
                 osc_runner.send_chatbox(self.current_track)
 
-        # 500 ms keeps the UI responsive while halving the callback frequency
         self.after(500, self.update_ui)
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
-    def on_closing(self):
-        # Flush any pending debounced config write before the process exits
-        config_manager._save_internal()
-        self.destroy()
 
 
 if __name__ == "__main__":

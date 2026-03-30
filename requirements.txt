@@ -2,3 +2,5 @@ python-osc==1.8.3
 customtkinter==5.2.2
 winrt-Windows.Media.Control
 winrt-Windows.Foundation
+pystray>=0.19.5
+Pillow>=10.0.0

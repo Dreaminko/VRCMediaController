@@ -9,7 +9,10 @@ TRANSLATIONS = {
         "format_label": "Chatbox Format String:\nUse {name} and {artist} as variables.",
         "language": "Language",
         "unknown": "Unknown",
-        "unknown_artist": "Unknown Artist"
+        "unknown_artist": "Unknown Artist",
+        "tray_show": "Show",
+        "tray_quit": "Quit",
+        "tray_tooltip": "VRCMediaController",
     },
     "zh": {
         "title": "VRChat 媒体控制器 (VRCMediaController)",
@@ -21,7 +24,10 @@ TRANSLATIONS = {
         "format_label": "聊天框格式字符串：\n使用 {name} 和 {artist} 作为变量。",
         "language": "语言 / Language",
         "unknown": "未知",
-        "unknown_artist": "未知艺术家"
+        "unknown_artist": "未知艺术家",
+        "tray_show": "显示窗口",
+        "tray_quit": "退出",
+        "tray_tooltip": "VRChat 媒体控制器",
     },
     "ja": {
         "title": "VRChat メディアコントローラー",
@@ -33,9 +39,13 @@ TRANSLATIONS = {
         "format_label": "チャットボックスのフォーマット文字列：\n{name} または {artist} を変数として使用します。",
         "language": "言語 / Language",
         "unknown": "不明",
-        "unknown_artist": "不明なアーティスト"
-    }
+        "unknown_artist": "不明なアーティスト",
+        "tray_show": "ウィンドウを表示",
+        "tray_quit": "終了",
+        "tray_tooltip": "VRChat メディアコントローラー",
+    },
 }
+
 
 def get_text(lang_code, key):
     """Fallback to english if key or lang is missing."""
