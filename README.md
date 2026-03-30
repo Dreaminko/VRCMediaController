@@ -1,4 +1,4 @@
-# VRChat Media Controller / VRChat 媒体控制器 / VRChat メディアコントローラー
+# VRChat Media Controller
 
 ![banner](images/banner.png)
 
