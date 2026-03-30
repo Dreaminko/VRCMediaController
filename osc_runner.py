@@ -88,3 +88,13 @@ def send_chatbox(text):
             print(f"[OSC] Sent to chatbox: {text}")
         except Exception as e:
             print(f"[OSC] Error sending Chatbox message: {e}")
+
+def clear_chatbox():
+    """Clears the VRChat chatbox via OSC."""
+    if _client:
+        try:
+            _client.send_message("/chatbox/input", ["", True])
+            print("[OSC] Cleared chatbox")
+        except Exception as e:
+            print(f"[OSC] Error clearing Chatbox message: {e}")
+

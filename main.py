@@ -112,6 +112,10 @@ class App(ctk.CTk):
     def on_toggle_chatbox(self):
         enabled = self.chatbox_var.get()
         config_manager.set("chatbox_enabled", enabled)
+        if not enabled:
+            osc_runner.clear_chatbox()
+        elif self.current_track != i18n.get_text(self.lang_code, "no_media"):
+            osc_runner.send_chatbox(self.current_track)
 
     def on_format_changed(self, event):
         val = self.format_entry.get()
