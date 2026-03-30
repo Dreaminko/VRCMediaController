@@ -8,7 +8,7 @@
 
 ## English
 
-A lightweight utility to bridge Windows media playback (Spotify, Apple Music, YouTube, etc.) with VRChat. 
+A lightweight utility to bridge Windows media playback with VRChat. 
 
 This tool displays your currently playing track in the VRChat Chatbox and allows you to control your media (Play/Pause, Previous, Next) directly from your VRChat Avatar's radial menu using OSC.
 
@@ -27,7 +27,7 @@ This tool displays your currently playing track in the VRChat Chatbox and allows
 
 ## 中文
 
-一个轻量级的实用工具，用于连接 Windows 系统媒体播放（如 Spotify, 网易云音乐, QQ音乐, YouTube 等）和 VRChat。
+一个轻量级的实用工具，用于连接 Windows 系统媒体播放和 VRChat。
 
 此工具可以将您当前正在播放的歌曲同步显示在 VRChat 聊天框（头顶字）中，并通过 OSC 协议，让您直接在 VRChat 内部的虚拟化身环形菜单里控制媒体播放（播放/暂停、上一首、下一首）。
 
@@ -45,7 +45,7 @@ This tool displays your currently playing track in the VRChat Chatbox and allows
 
 ## 日本語
 
-Windowsのメディア再生（Spotify、Apple Music、YouTubeなど）とVRChatを連携させる軽量ユーティリティです。
+Windowsのメディア再生とVRChatを連携させる軽量ユーティリティです。
 
 現在再生中の曲目をVRChatのチャットボックス上に表示し、OSCを利用してVRChatのアバターのラジアルメニューから直接メディア（再生/一時停止、前へ、次へ）をコントロールできるようにします。
 
