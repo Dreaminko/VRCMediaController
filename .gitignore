@@ -2,4 +2,6 @@
 __pycache__
 config.json
 Modular_Avatar_Guide.md
-build.bat
+build
+dist
+venv
