@@ -1,5 +1,7 @@
 import sys
+import os
 import threading
+import ctypes
 import customtkinter as ctk
 from config import config_manager
 import media_control
@@ -9,6 +11,13 @@ import i18n
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
+def get_resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -17,6 +26,23 @@ class App(ctk.CTk):
         self.title(i18n.get_text(self.lang_code, "title"))
         self.geometry("450x360")
         self.resizable(False, False)
+
+        # Set AppUserModelID so Windows taskbar shows the correct icon
+        try:
+            myappid = 'vrc.media.controller.1.0'
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
+        # Set window icon
+        icon_path = get_resource_path("fav.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.iconbitmap(icon_path)
+                # Sometimes custom tkinter needs this on window load to stick reliably
+                self.after(200, lambda: self.iconbitmap(icon_path))
+            except Exception as e:
+                print(f"Could not load icon: {e}")
 
         # State Variables
         self.current_track = i18n.get_text(self.lang_code, "no_media")
