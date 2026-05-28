@@ -1,0 +1,7 @@
+{
+  "chatbox_format": "🎵 {name} - {artist}",
+  "chatbox_enabled": true,
+  "language": "en",
+  "chatbox_display_mode": "persistent",
+  "chatbox_display_duration": 10
+}
