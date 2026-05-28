@@ -18,6 +18,12 @@ use i18n::I18n;
 use media::{start_media_monitoring, TrackEvent, TrackInfo};
 use osc::{start_osc, MediaCommand, OscCommand, OscHandle};
 
+/// Commands sent from tray event handlers (OS-level callbacks) to the egui update loop
+enum TrayCommand {
+    Show,
+    Quit,
+}
+
 struct VrcMediaController {
     i18n: I18n,
     config: ConfigManager,
@@ -37,9 +43,7 @@ struct VrcMediaController {
     // System tray
     has_tray: bool,
     _tray_icon: Option<tray_icon::TrayIcon>,
-    tray_events: Option<tray_icon::menu::MenuEventReceiver>,
-    tray_show_id: Option<tray_icon::menu::MenuId>,
-    tray_quit_id: Option<tray_icon::menu::MenuId>,
+    tray_rx: Option<mpsc::UnboundedReceiver<TrayCommand>>,
     quitting: bool,
 
     // Track updates from media thread
@@ -58,6 +62,8 @@ impl VrcMediaController {
         osc: OscHandle,
         tray: Option<TrayComponents>,
         track_rx: mpsc::UnboundedReceiver<TrackEvent>,
+        tray_rx: mpsc::UnboundedReceiver<TrayCommand>,
+        tray_tx: mpsc::UnboundedSender<TrayCommand>,
     ) -> Self {
         // Load CJK-capable system font before anything else
         setup_cjk_fonts(&cc.egui_ctx);
@@ -69,16 +75,51 @@ impl VrcMediaController {
         let lang_code = config.get_language();
         let no_media_text = i18n.get(&lang_code, "no_media");
 
-        let (tray_icon, tray_events, tray_show_id, tray_quit_id) = match tray {
-            Some(t) => (
-                Some(t.icon),
-                Some(t.events),
-                Some(t.show_id),
-                Some(t.quit_id),
-            ),
-            None => (None, None, None, None),
+        let (tray_icon, has_tray) = match tray {
+            Some(t) => {
+                // Register OS-level tray menu event handler.
+                // This closure runs on an OS callback thread, so it can fire even
+                // when the winit event loop is in deep sleep (window hidden).
+                // Calling request_repaint() here forcibly wakes egui up.
+                {
+                    let show_id = t.show_id;
+                    let quit_id = t.quit_id;
+                    let egui_ctx = cc.egui_ctx.clone();
+                    let tx = tray_tx.clone();
+                    tray_icon::menu::MenuEvent::set_event_handler(Some(
+                        move |event: tray_icon::menu::MenuEvent| {
+                            if event.id == show_id {
+                                let _ = tx.send(TrayCommand::Show);
+                            } else if event.id == quit_id {
+                                let _ = tx.send(TrayCommand::Quit);
+                            }
+                            egui_ctx.request_repaint();
+                        },
+                    ));
+                }
+
+                // Register left-click on tray icon to show the window
+                {
+                    let tx = tray_tx;
+                    let egui_ctx = cc.egui_ctx.clone();
+                    tray_icon::TrayIconEvent::set_event_handler(Some(
+                        move |event: tray_icon::TrayIconEvent| {
+                            if let tray_icon::TrayIconEvent::Click {
+                                button: tray_icon::MouseButton::Left,
+                                ..
+                            } = event
+                            {
+                                let _ = tx.send(TrayCommand::Show);
+                                egui_ctx.request_repaint();
+                            }
+                        },
+                    ));
+                }
+
+                (Some(t.icon), true)
+            }
+            None => (None, false),
         };
-        let has_tray = tray_icon.is_some();
 
         Self {
             config,
@@ -94,9 +135,7 @@ impl VrcMediaController {
             display_mode,
             display_duration,
             _tray_icon: tray_icon,
-            tray_events,
-            tray_show_id,
-            tray_quit_id,
+            tray_rx: if has_tray { Some(tray_rx) } else { None },
             has_tray,
             quitting: false,
             track_rx,
@@ -153,26 +192,26 @@ impl eframe::App for VrcMediaController {
             if self.has_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                // Keep the event loop alive so tray menu events are processed
-                // even while the window is hidden.
-                ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
             // If no tray, let close happen normally (app exits)
             return;
         }
 
-        // Poll tray menu events (runs on main thread, no Send needed)
-        if let (Some(ref events), Some(ref show_id), Some(ref quit_id)) =
-            (&self.tray_events, &self.tray_show_id, &self.tray_quit_id)
-        {
-            while let Ok(event) = events.try_recv() {
-                if event.id == *show_id {
-                    self.pending_show = true;
-                } else if event.id == *quit_id {
-                    self.config.write_to_disk();
-                    self.quitting = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    return;
+        // Consume tray commands pushed by the OS-level event handlers.
+        // These handlers call request_repaint() to wake egui even when the
+        // window is hidden and the winit event loop is in deep sleep.
+        if let Some(ref mut rx) = self.tray_rx {
+            while let Ok(cmd) = rx.try_recv() {
+                match cmd {
+                    TrayCommand::Show => {
+                        self.pending_show = true;
+                    }
+                    TrayCommand::Quit => {
+                        self.config.write_to_disk();
+                        self.quitting = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        return;
+                    }
                 }
             }
         }
@@ -423,14 +462,13 @@ fn setup_cjk_fonts(ctx: &egui::Context) {
 
 struct TrayComponents {
     icon: tray_icon::TrayIcon,
-    events: tray_icon::menu::MenuEventReceiver,
     show_id: tray_icon::menu::MenuId,
     quit_id: tray_icon::menu::MenuId,
 }
 
 #[cfg(windows)]
 fn setup_tray_icon(i18n: &I18n, lang: &str) -> Option<TrayComponents> {
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+    use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::TrayIconBuilder;
 
     let show_item = MenuItem::new(i18n.get(lang, "tray_show"), true, None);
@@ -451,11 +489,8 @@ fn setup_tray_icon(i18n: &I18n, lang: &str) -> Option<TrayComponents> {
         .build()
         .ok()?;
 
-    let events = MenuEvent::receiver().clone();
-
     Some(TrayComponents {
         icon: tray,
-        events,
         show_id,
         quit_id,
     })
@@ -544,6 +579,11 @@ fn main() {
     let tray = setup_tray_icon(&i18n, &config.get_language());
     let window_icon = load_window_icon();
 
+    // Channel for tray event handlers -> egui update loop.
+    // The sender is captured by OS-level callbacks registered in new();
+    // the receiver is polled in update().
+    let (tray_tx, tray_rx) = mpsc::unbounded_channel::<TrayCommand>();
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([450.0, 440.0])
@@ -563,6 +603,8 @@ fn main() {
                 osc,
                 tray,
                 track_rx,
+                tray_rx,
+                tray_tx,
             )))
         }),
     );
