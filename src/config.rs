@@ -33,16 +33,10 @@ pub struct Config {
     pub chatbox_display_mode: String,
     #[serde(default = "default_display_duration")]
     pub chatbox_display_duration: u32,
-    #[serde(default)]
-    pub heart_rate_enabled: bool,
-    #[serde(default)]
-    pub heart_rate_device_id: Option<String>,
-    #[serde(default)]
-    pub heart_rate_device_name: Option<String>,
 }
 
 fn default_chatbox_format() -> String {
-    "🎵 {name} - {artist} | ❤️ {heartrate} bpm".to_string()
+    "🎵 {name} - {artist}".to_string()
 }
 fn default_chatbox_enabled() -> bool {
     true
@@ -65,9 +59,6 @@ impl Default for Config {
             language: default_language(),
             chatbox_display_mode: default_display_mode(),
             chatbox_display_duration: default_display_duration(),
-            heart_rate_enabled: false,
-            heart_rate_device_id: None,
-            heart_rate_device_name: None,
         }
     }
 }
@@ -128,18 +119,6 @@ impl ConfigManager {
         self.inner.read().chatbox_display_duration
     }
 
-    pub fn get_heart_rate_enabled(&self) -> bool {
-        self.inner.read().heart_rate_enabled
-    }
-
-    pub fn get_heart_rate_device_id(&self) -> Option<String> {
-        self.inner.read().heart_rate_device_id.clone()
-    }
-
-    pub fn get_heart_rate_device_name(&self) -> Option<String> {
-        self.inner.read().heart_rate_device_name.clone()
-    }
-
     pub fn set_language(&self, lang: &str) {
         let mut cfg = self.inner.write();
         if cfg.language != lang {
@@ -180,25 +159,6 @@ impl ConfigManager {
         let mut cfg = self.inner.write();
         if cfg.chatbox_display_duration != duration {
             cfg.chatbox_display_duration = duration;
-            drop(cfg);
-            self.write_to_disk();
-        }
-    }
-
-    pub fn set_heart_rate_enabled(&self, enabled: bool) {
-        let mut cfg = self.inner.write();
-        if cfg.heart_rate_enabled != enabled {
-            cfg.heart_rate_enabled = enabled;
-            drop(cfg);
-            self.write_to_disk();
-        }
-    }
-
-    pub fn set_heart_rate_device(&self, id: Option<String>, name: Option<String>) {
-        let mut cfg = self.inner.write();
-        if cfg.heart_rate_device_id != id || cfg.heart_rate_device_name != name {
-            cfg.heart_rate_device_id = id;
-            cfg.heart_rate_device_name = name;
             drop(cfg);
             self.write_to_disk();
         }

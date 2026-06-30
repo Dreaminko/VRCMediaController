@@ -3,9 +3,5 @@
   "chatbox_enabled": true,
   "language": "en",
   "chatbox_display_mode": "persistent",
-  "chatbox_display_duration": 10,
-  "heart_rate_enabled": false,
-  "heart_rate_device_id": null,
-  "heart_rate_device_name": null,
-  "heart_rate_format": "❤️ {heartrate} bpm"
+  "chatbox_display_duration": 10
 }
