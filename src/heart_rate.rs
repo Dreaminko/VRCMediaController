@@ -105,6 +105,7 @@ mod windows_ble {
         session: GattSession,
         session_status_token: EventRegistrationToken,
         _service: GattDeviceService,
+        _device: BluetoothLEDevice,
     }
 
     impl Drop for Connection {
@@ -116,6 +117,10 @@ mod windows_ble {
                 .session
                 .RemoveSessionStatusChanged(self.session_status_token);
             let _ = self.session.SetMaintainConnection(false);
+            // Close the device handle so Windows knows we are done with it.
+            // Without a live BluetoothLEDevice reference the OS will
+            // automatically disconnect after a short timeout.
+            self._device.Close().ok();
         }
     }
 
@@ -333,6 +338,7 @@ mod windows_ble {
             session,
             session_status_token,
             _service: service,
+            _device: device,
         })
     }
 

@@ -53,7 +53,6 @@ struct VrcMediaController {
     heart_rate_status: HeartRateStatus,
     heart_rate_device_id: Option<String>,
     heart_rate_device_name: Option<String>,
-    heart_rate_format: String,
     current_heart_rate: Option<(u16, std::time::Instant)>,
     last_chatbox_text: Option<String>,
     last_chatbox_send: Option<std::time::Instant>,
@@ -99,7 +98,6 @@ impl VrcMediaController {
         let heart_rate_enabled = config.get_heart_rate_enabled();
         let heart_rate_device_id = config.get_heart_rate_device_id();
         let heart_rate_device_name = config.get_heart_rate_device_name();
-        let heart_rate_format = config.get_heart_rate_format();
         let no_media_text = i18n.get(&lang_code, "no_media");
 
         let (tray_icon, has_tray) = match tray {
@@ -177,7 +175,6 @@ impl VrcMediaController {
             heart_rate_status: HeartRateStatus::Disabled,
             heart_rate_device_id,
             heart_rate_device_name,
-            heart_rate_format,
             current_heart_rate: None,
             last_chatbox_text: None,
             last_chatbox_send: None,
@@ -215,6 +212,7 @@ impl VrcMediaController {
         self.format_buffer
             .replace("{name}", title)
             .replace("{artist}", artist)
+            .replace("{heartrate}", "")
     }
 
     fn handle_track_update(&mut self, info: Option<TrackInfo>) {
@@ -241,15 +239,27 @@ impl VrcMediaController {
     }
 
     fn desired_chatbox_text(&self) -> Option<String> {
-        let media = self
+        let name = self
             .current_raw_track
             .as_ref()
-            .map(|_| self.current_track.as_str());
+            .and_then(|t| t.title.as_deref().filter(|n| !n.is_empty()))
+            .unwrap_or("");
+        let artist = self
+            .current_raw_track
+            .as_ref()
+            .and_then(|t| t.artist.as_deref().filter(|a| !a.is_empty()))
+            .unwrap_or("");
         let heart_rate = self
             .heart_rate_enabled
             .then(|| self.active_heart_rate())
             .flatten();
-        compose_chatbox(media, heart_rate, &self.heart_rate_format)
+
+        // When neither source is active, return nothing.
+        if self.current_raw_track.is_none() && heart_rate.is_none() {
+            return None;
+        }
+
+        compose_chatbox(&self.format_buffer, name, artist, heart_rate)
     }
 
     fn update_chatbox(&mut self, force: bool) {
@@ -293,6 +303,9 @@ impl eframe::App for VrcMediaController {
             if self.has_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // Keep the event loop alive so tray commands are processed
+                // even when the window is hidden.
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
             // If no tray, let close happen normally (app exits)
             return;
@@ -390,6 +403,18 @@ impl eframe::App for VrcMediaController {
             self.build_ui(ui);
         });
 
+        // Dynamically adjust window height to fit content
+        if !self.quitting {
+            let used = ctx.used_size();
+            let desired_h = used.y.max(280.0).min(900.0);
+            let desired = egui::vec2(480.0, desired_h);
+            let current =
+                ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()).unwrap_or(desired));
+            if (desired.y - current.y).abs() > 4.0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(desired));
+            }
+        }
+
         ctx.request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
@@ -411,7 +436,6 @@ impl VrcMediaController {
         let t_enable_heart_rate = self.i18n.get(&self.lang_code, "enable_heart_rate");
         let t_scan_devices = self.i18n.get(&self.lang_code, "scan_devices");
         let t_heart_rate_device = self.i18n.get(&self.lang_code, "heart_rate_device");
-        let t_heart_rate_format = self.i18n.get(&self.lang_code, "heart_rate_format");
 
         ui.vertical_centered(|ui| {
             ui.heading(&t_title);
@@ -465,187 +489,169 @@ impl VrcMediaController {
         ui.add_space(8.0);
 
         // Settings area
-        egui::ScrollArea::vertical()
-            .max_height(ui.available_height() - 20.0)
-            .show(ui, |ui| {
-                // --- Chatbox toggle ---
-                let mut enabled = self.chatbox_enabled;
-                if ui.checkbox(&mut enabled, &t_enable_chatbox).changed() {
-                    self.chatbox_enabled = enabled;
-                    self.config.set_chatbox_enabled(enabled);
-                    if !enabled {
-                        let _ = self.osc.cmd_tx.send(OscCommand::ClearChatbox);
-                        self.last_chatbox_text = None;
-                    } else {
-                        self.chatbox_dirty = true;
-                        self.update_chatbox(true);
-                    }
-                }
+        // --- Chatbox toggle ---
+        let mut enabled = self.chatbox_enabled;
+        if ui.checkbox(&mut enabled, &t_enable_chatbox).changed() {
+            self.chatbox_enabled = enabled;
+            self.config.set_chatbox_enabled(enabled);
+            if !enabled {
+                let _ = self.osc.cmd_tx.send(OscCommand::ClearChatbox);
+                self.last_chatbox_text = None;
+            } else {
+                self.chatbox_dirty = true;
+                self.update_chatbox(true);
+            }
+        }
 
-                ui.add_space(6.0);
+        ui.add_space(6.0);
 
-                // --- Format string ---
-                ui.label(egui::RichText::new(&t_format_label).size(12.0));
-                let fmt_resp = ui.add_sized(
-                    [ui.available_width(), 22.0],
-                    egui::TextEdit::singleline(&mut self.format_buffer),
-                );
-                if fmt_resp.changed() {
-                    self.config.set_chatbox_format(&self.format_buffer);
-                    if let Some(ref track) = self.current_raw_track {
-                        self.current_track = self.format_track(track);
-                        self.chatbox_dirty = true;
-                    }
-                }
+        // --- Format string ---
+        ui.label(egui::RichText::new(&t_format_label).size(12.0));
+        let fmt_resp = ui.add_sized(
+            [ui.available_width(), 22.0],
+            egui::TextEdit::singleline(&mut self.format_buffer),
+        );
+        if fmt_resp.changed() {
+            self.config.set_chatbox_format(&self.format_buffer);
+            if let Some(ref track) = self.current_raw_track {
+                self.current_track = self.format_track(track);
+                self.chatbox_dirty = true;
+            }
+        }
 
-                ui.add_space(10.0);
+        ui.add_space(10.0);
 
-                // --- Display mode ---
-                ui.label(&t_display_mode_label);
+        // --- Display mode ---
+        ui.label(&t_display_mode_label);
 
-                let mut mode_changed = false;
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(self.display_mode == "persistent", &t_mode_persistent)
-                        .clicked()
-                    {
-                        self.display_mode = "persistent".to_string();
-                        self.config.set_display_mode("persistent");
-                        mode_changed = true;
-                    }
-                    if ui
-                        .selectable_label(self.display_mode == "timed", &t_mode_timed)
-                        .clicked()
-                    {
-                        self.display_mode = "timed".to_string();
-                        self.config.set_display_mode("timed");
-                        mode_changed = true;
-                    }
-                });
+        let mut mode_changed = false;
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(self.display_mode == "persistent", &t_mode_persistent)
+                .clicked()
+            {
+                self.display_mode = "persistent".to_string();
+                self.config.set_display_mode("persistent");
+                mode_changed = true;
+            }
+            if ui
+                .selectable_label(self.display_mode == "timed", &t_mode_timed)
+                .clicked()
+            {
+                self.display_mode = "timed".to_string();
+                self.config.set_display_mode("timed");
+                mode_changed = true;
+            }
+        });
 
-                if self.display_mode == "timed" {
-                    ui.add_space(4.0);
-                    let mut dur = self.display_duration;
-                    let dur_label = t_display_duration_label.replace("{n}", &dur.to_string());
-                    ui.horizontal(|ui| {
-                        ui.label(&dur_label);
-                        if ui
-                            .add(egui::Slider::new(&mut dur, 5..=60).step_by(5.0).suffix("s"))
-                            .changed()
-                        {
-                            self.display_duration = dur;
-                            self.config.set_display_duration(dur);
-                        }
-                    });
-                }
-
-                if mode_changed {
-                    let _ = self.osc.cmd_tx.send(OscCommand::RefreshDisplay);
-                }
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(8.0);
-
-                ui.label(egui::RichText::new(&t_heart_rate).strong());
-                let mut hr_enabled = self.heart_rate_enabled;
-                if ui.checkbox(&mut hr_enabled, &t_enable_heart_rate).changed() {
-                    self.heart_rate_enabled = hr_enabled;
-                    self.config.set_heart_rate_enabled(hr_enabled);
-                    self.current_heart_rate = None;
-                    self.chatbox_dirty = true;
-                    if hr_enabled {
-                        if let Some(ref id) = self.heart_rate_device_id {
-                            let _ = self
-                                .heart_rate
-                                .cmd_tx
-                                .send(HeartRateCommand::Connect(id.clone()));
-                        } else {
-                            let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
-                        }
-                    } else {
-                        self.next_heart_rate_reconnect = None;
-                        let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Disconnect);
-                    }
-                }
-
-                ui.horizontal(|ui| {
-                    ui.label(&t_heart_rate_device);
-                    let selected_name = self
-                        .heart_rate_device_name
-                        .clone()
-                        .unwrap_or_else(|| "-".to_string());
-                    egui::ComboBox::from_id_salt("heart_rate_device")
-                        .selected_text(selected_name)
-                        .show_ui(ui, |ui| {
-                            for device in self.heart_rate_devices.clone() {
-                                let selected = self.heart_rate_device_id.as_deref()
-                                    == Some(device.id.as_str());
-                                if ui.selectable_label(selected, &device.name).clicked() {
-                                    self.heart_rate_device_id = Some(device.id.clone());
-                                    self.heart_rate_device_name = Some(device.name.clone());
-                                    self.config.set_heart_rate_device(
-                                        Some(device.id.clone()),
-                                        Some(device.name),
-                                    );
-                                    if self.heart_rate_enabled {
-                                        let _ = self
-                                            .heart_rate
-                                            .cmd_tx
-                                            .send(HeartRateCommand::Connect(device.id));
-                                    }
-                                }
-                            }
-                        });
-                    if ui.button(&t_scan_devices).clicked() {
-                        let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
-                    }
-                });
-
-                ui.label(&t_heart_rate_format);
+        if self.display_mode == "timed" {
+            ui.add_space(4.0);
+            let mut dur = self.display_duration;
+            let dur_label = t_display_duration_label.replace("{n}", &dur.to_string());
+            ui.horizontal(|ui| {
+                ui.label(&dur_label);
                 if ui
-                    .add_sized(
-                        [ui.available_width(), 22.0],
-                        egui::TextEdit::singleline(&mut self.heart_rate_format),
-                    )
+                    .add(egui::Slider::new(&mut dur, 5..=60).step_by(5.0).suffix("s"))
                     .changed()
                 {
-                    self.config.set_heart_rate_format(&self.heart_rate_format);
-                    self.chatbox_dirty = true;
+                    self.display_duration = dur;
+                    self.config.set_display_duration(dur);
                 }
+            });
+        }
 
-                ui.add_space(12.0);
-                ui.separator();
-                ui.add_space(8.0);
+        if mode_changed {
+            let _ = self.osc.cmd_tx.send(OscCommand::RefreshDisplay);
+        }
 
-                // --- Language ---
-                ui.horizontal(|ui| {
-                    ui.label(&t_language);
-                    let languages = ["English", "中文", "日本語"];
-                    let lang_codes = ["en", "zh", "ja"];
-                    let current_idx = lang_codes
-                        .iter()
-                        .position(|&c| c == self.lang_code)
-                        .unwrap_or(0);
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
 
-                    let mut selected_idx = current_idx;
-                    egui::ComboBox::from_id_salt("lang")
-                        .selected_text(languages[current_idx])
-                        .show_ui(ui, |ui| {
-                            for (i, name) in languages.iter().enumerate() {
-                                if ui.selectable_label(i == selected_idx, *name).clicked() {
-                                    selected_idx = i;
-                                }
+        ui.label(egui::RichText::new(&t_heart_rate).strong());
+        let mut hr_enabled = self.heart_rate_enabled;
+        if ui.checkbox(&mut hr_enabled, &t_enable_heart_rate).changed() {
+            self.heart_rate_enabled = hr_enabled;
+            self.config.set_heart_rate_enabled(hr_enabled);
+            self.current_heart_rate = None;
+            self.chatbox_dirty = true;
+            if hr_enabled {
+                if let Some(ref id) = self.heart_rate_device_id {
+                    let _ = self
+                        .heart_rate
+                        .cmd_tx
+                        .send(HeartRateCommand::Connect(id.clone()));
+                } else {
+                    let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
+                }
+            } else {
+                self.next_heart_rate_reconnect = None;
+                let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Disconnect);
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(&t_heart_rate_device);
+            let selected_name = self
+                .heart_rate_device_name
+                .clone()
+                .unwrap_or_else(|| "-".to_string());
+            egui::ComboBox::from_id_salt("heart_rate_device")
+                .selected_text(selected_name)
+                .show_ui(ui, |ui| {
+                    for device in self.heart_rate_devices.clone() {
+                        let selected =
+                            self.heart_rate_device_id.as_deref() == Some(device.id.as_str());
+                        if ui.selectable_label(selected, &device.name).clicked() {
+                            self.heart_rate_device_id = Some(device.id.clone());
+                            self.heart_rate_device_name = Some(device.name.clone());
+                            self.config
+                                .set_heart_rate_device(Some(device.id.clone()), Some(device.name));
+                            if self.heart_rate_enabled {
+                                let _ = self
+                                    .heart_rate
+                                    .cmd_tx
+                                    .send(HeartRateCommand::Connect(device.id));
                             }
-                        });
-
-                    if selected_idx != current_idx {
-                        self.lang_code = lang_codes[selected_idx].to_string();
-                        self.config.set_language(lang_codes[selected_idx]);
-                        self.apply_language();
+                        }
                     }
                 });
-            });
+            if ui.button(&t_scan_devices).clicked() {
+                let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
+            }
+        });
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        // --- Language ---
+        ui.horizontal(|ui| {
+            ui.label(&t_language);
+            let languages = ["English", "中文", "日本語"];
+            let lang_codes = ["en", "zh", "ja"];
+            let current_idx = lang_codes
+                .iter()
+                .position(|&c| c == self.lang_code)
+                .unwrap_or(0);
+
+            let mut selected_idx = current_idx;
+            egui::ComboBox::from_id_salt("lang")
+                .selected_text(languages[current_idx])
+                .show_ui(ui, |ui| {
+                    for (i, name) in languages.iter().enumerate() {
+                        if ui.selectable_label(i == selected_idx, *name).clicked() {
+                            selected_idx = i;
+                        }
+                    }
+                });
+
+            if selected_idx != current_idx {
+                self.lang_code = lang_codes[selected_idx].to_string();
+                self.config.set_language(lang_codes[selected_idx]);
+                self.apply_language();
+            }
+        });
     }
 }
 
@@ -825,7 +831,7 @@ fn main() {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([480.0, 620.0])
+            .with_min_inner_size([480.0, 280.0])
             .with_resizable(false)
             .with_icon(window_icon.unwrap_or_default()),
         ..Default::default()

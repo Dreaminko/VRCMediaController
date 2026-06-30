@@ -15,7 +15,7 @@ fn build_translations() -> HashMap<&'static str, LangMap> {
             ("enable_chatbox", "Enable Chatbox Output"),
             (
                 "format_label",
-                "Chatbox Format String:\nUse {name} and {artist} as variables.",
+                "Chatbox Format String:\nUse {name}, {artist}, and {heartrate} as variables.",
             ),
             ("language", "Language"),
             ("unknown", "Unknown"),
@@ -31,10 +31,6 @@ fn build_translations() -> HashMap<&'static str, LangMap> {
             ("enable_heart_rate", "Enable BLE Heart Rate"),
             ("scan_devices", "Scan"),
             ("heart_rate_device", "Device:"),
-            (
-                "heart_rate_format",
-                "Heart rate format; use {heartrate} as the BPM value:",
-            ),
             ("heart_rate_disabled", "Heart rate: Disabled"),
             ("heart_rate_scanning", "Heart rate: Scanning..."),
             ("heart_rate_disconnected", "Heart rate: Disconnected"),
@@ -54,7 +50,7 @@ fn build_translations() -> HashMap<&'static str, LangMap> {
             ("enable_chatbox", "启用聊天框文字输出"),
             (
                 "format_label",
-                "聊天框格式字符串：\n使用 {name} 和 {artist} 作为变量。",
+                "聊天框格式字符串：\n使用 {name}、{artist} 和 {heartrate} 作为变量。",
             ),
             ("language", "语言 / Language"),
             ("unknown", "未知"),
@@ -70,7 +66,6 @@ fn build_translations() -> HashMap<&'static str, LangMap> {
             ("enable_heart_rate", "启用 BLE 心率"),
             ("scan_devices", "扫描"),
             ("heart_rate_device", "设备："),
-            ("heart_rate_format", "心率格式；使用 {heartrate} 表示 BPM："),
             ("heart_rate_disabled", "心率：已禁用"),
             ("heart_rate_scanning", "心率：正在扫描……"),
             ("heart_rate_disconnected", "心率：未连接"),
@@ -90,7 +85,7 @@ fn build_translations() -> HashMap<&'static str, LangMap> {
             ("enable_chatbox", "チャットボックス出力を有効にする"),
             (
                 "format_label",
-                "チャットボックスのフォーマット文字列：\n{name} または {artist} を変数として使用します。",
+                "チャットボックスのフォーマット文字列：\n{name}、{artist}、{heartrate} を変数として使用します。",
             ),
             ("language", "言語 / Language"),
             ("unknown", "不明"),
@@ -106,7 +101,6 @@ fn build_translations() -> HashMap<&'static str, LangMap> {
             ("enable_heart_rate", "BLE心拍数を有効にする"),
             ("scan_devices", "スキャン"),
             ("heart_rate_device", "デバイス："),
-            ("heart_rate_format", "心拍数形式；BPMには {heartrate} を使用："),
             ("heart_rate_disabled", "心拍数：無効"),
             ("heart_rate_scanning", "心拍数：スキャン中…"),
             ("heart_rate_disconnected", "心拍数：未接続"),

@@ -39,12 +39,10 @@ pub struct Config {
     pub heart_rate_device_id: Option<String>,
     #[serde(default)]
     pub heart_rate_device_name: Option<String>,
-    #[serde(default = "default_heart_rate_format")]
-    pub heart_rate_format: String,
 }
 
 fn default_chatbox_format() -> String {
-    "🎵 {name} - {artist}".to_string()
+    "🎵 {name} - {artist} | ❤️ {heartrate} bpm".to_string()
 }
 fn default_chatbox_enabled() -> bool {
     true
@@ -58,9 +56,6 @@ fn default_display_mode() -> String {
 fn default_display_duration() -> u32 {
     10
 }
-fn default_heart_rate_format() -> String {
-    "❤️ {heartrate} bpm".to_string()
-}
 
 impl Default for Config {
     fn default() -> Self {
@@ -73,7 +68,6 @@ impl Default for Config {
             heart_rate_enabled: false,
             heart_rate_device_id: None,
             heart_rate_device_name: None,
-            heart_rate_format: default_heart_rate_format(),
         }
     }
 }
@@ -146,10 +140,6 @@ impl ConfigManager {
         self.inner.read().heart_rate_device_name.clone()
     }
 
-    pub fn get_heart_rate_format(&self) -> String {
-        self.inner.read().heart_rate_format.clone()
-    }
-
     pub fn set_language(&self, lang: &str) {
         let mut cfg = self.inner.write();
         if cfg.language != lang {
@@ -209,15 +199,6 @@ impl ConfigManager {
         if cfg.heart_rate_device_id != id || cfg.heart_rate_device_name != name {
             cfg.heart_rate_device_id = id;
             cfg.heart_rate_device_name = name;
-            drop(cfg);
-            self.write_to_disk();
-        }
-    }
-
-    pub fn set_heart_rate_format(&self, format: &str) {
-        let mut cfg = self.inner.write();
-        if cfg.heart_rate_format != format {
-            cfg.heart_rate_format = format.to_string();
             drop(cfg);
             self.write_to_disk();
         }
