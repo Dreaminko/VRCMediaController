@@ -25,12 +25,6 @@ use i18n::I18n;
 use media::{start_media_monitoring, TrackEvent, TrackInfo};
 use osc::{start_osc, MediaCommand, OscCommand, OscHandle};
 
-/// Commands sent from tray event handlers (OS-level callbacks) to the egui update loop
-enum TrayCommand {
-    Show,
-    Quit,
-}
-
 struct VrcMediaController {
     i18n: I18n,
     config: ConfigManager,
@@ -62,8 +56,9 @@ struct VrcMediaController {
 
     // System tray
     has_tray: bool,
+    tray_show_id: tray_icon::menu::MenuId,
+    tray_quit_id: tray_icon::menu::MenuId,
     _tray_icon: Option<tray_icon::TrayIcon>,
-    tray_rx: Option<mpsc::UnboundedReceiver<TrayCommand>>,
     quitting: bool,
 
     // Track updates from media thread
@@ -84,8 +79,6 @@ impl VrcMediaController {
         heart_rate_rx: mpsc::UnboundedReceiver<HeartRateEvent>,
         tray: Option<TrayComponents>,
         track_rx: mpsc::UnboundedReceiver<TrackEvent>,
-        tray_rx: mpsc::UnboundedReceiver<TrayCommand>,
-        tray_tx: mpsc::UnboundedSender<TrayCommand>,
     ) -> Self {
         // Load CJK-capable system font before anything else
         setup_cjk_fonts(&cc.egui_ctx);
@@ -100,50 +93,23 @@ impl VrcMediaController {
         let heart_rate_device_name = config.get_heart_rate_device_name();
         let no_media_text = i18n.get(&lang_code, "no_media");
 
-        let (tray_icon, has_tray) = match tray {
+        let (tray_icon, has_tray, tray_show_id, tray_quit_id) = match tray {
             Some(t) => {
-                // Register OS-level tray menu event handler.
-                // This closure runs on an OS callback thread, so it can fire even
-                // when the winit event loop is in deep sleep (window hidden).
-                // Calling request_repaint() here forcibly wakes egui up.
-                {
-                    let show_id = t.show_id;
-                    let quit_id = t.quit_id;
-                    let egui_ctx = cc.egui_ctx.clone();
-                    let tx = tray_tx.clone();
-                    tray_icon::menu::MenuEvent::set_event_handler(Some(
-                        move |event: tray_icon::menu::MenuEvent| {
-                            if event.id == show_id {
-                                let _ = tx.send(TrayCommand::Show);
-                            } else if event.id == quit_id {
-                                let _ = tx.send(TrayCommand::Quit);
-                            }
-                            egui_ctx.request_repaint();
-                        },
-                    ));
-                }
-
-                // Register left-click on tray icon to show the window
-                {
-                    let tx = tray_tx;
-                    let egui_ctx = cc.egui_ctx.clone();
-                    tray_icon::TrayIconEvent::set_event_handler(Some(
-                        move |event: tray_icon::TrayIconEvent| {
-                            if let tray_icon::TrayIconEvent::Click {
-                                button: tray_icon::MouseButton::Left,
-                                ..
-                            } = event
-                            {
-                                let _ = tx.send(TrayCommand::Show);
-                                egui_ctx.request_repaint();
-                            }
-                        },
-                    ));
-                }
-
-                (Some(t.icon), true)
+                // Tray menu events are polled via MenuEvent::receiver() in
+                // update(), avoiding the cross-thread set_event_handler approach
+                // that can silently break on some Windows configurations.
+                (Some(t.icon), true, t.show_id, t.quit_id)
             }
-            None => (None, false),
+            None => {
+                // Dummy IDs for the unused path; has_tray is false so the
+                // polling code in update() is never reached.
+                (
+                    None,
+                    false,
+                    tray_icon::menu::MenuId::from(0u32),
+                    tray_icon::menu::MenuId::from(0u32),
+                )
+            }
         };
 
         if heart_rate_enabled {
@@ -182,7 +148,8 @@ impl VrcMediaController {
             next_heart_rate_reconnect: None,
             heart_rate_reconnect_delay: std::time::Duration::from_secs(2),
             _tray_icon: tray_icon,
-            tray_rx: if has_tray { Some(tray_rx) } else { None },
+            tray_show_id,
+            tray_quit_id,
             has_tray,
             quitting: false,
             track_rx,
@@ -311,21 +278,31 @@ impl eframe::App for VrcMediaController {
             return;
         }
 
-        // Consume tray commands pushed by the OS-level event handlers.
-        // These handlers call request_repaint() to wake egui even when the
-        // window is hidden and the winit event loop is in deep sleep.
-        if let Some(ref mut rx) = self.tray_rx {
-            while let Ok(cmd) = rx.try_recv() {
-                match cmd {
-                    TrayCommand::Show => {
-                        self.pending_show = true;
-                    }
-                    TrayCommand::Quit => {
-                        self.config.write_to_disk();
-                        self.quitting = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        return;
-                    }
+        // Poll tray menu / click events directly from the tray-icon event
+        // channel.  This avoids the global set_event_handler callback which
+        // depends on cross-thread wake-ups that can silently break on some
+        // Windows configurations.
+        if self.has_tray {
+            use tray_icon::menu::MenuEvent;
+            while let Ok(event) = MenuEvent::receiver().try_recv() {
+                if event.id == self.tray_show_id {
+                    self.pending_show = true;
+                } else if event.id == self.tray_quit_id {
+                    self.config.write_to_disk();
+                    self.quitting = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
+            }
+
+            use tray_icon::TrayIconEvent;
+            while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+                if let tray_icon::TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    ..
+                } = event
+                {
+                    self.pending_show = true;
                 }
             }
         }
@@ -343,7 +320,28 @@ impl eframe::App for VrcMediaController {
 
         while let Ok(event) = self.heart_rate_rx.try_recv() {
             match event {
-                HeartRateEvent::Devices(devices) => self.heart_rate_devices = devices,
+                HeartRateEvent::Devices(devices) => {
+                    // If we are in disconnected/error state and our target
+                    // device shows up in the scan result, attempt to
+                    // reconnect immediately.
+                    if self.heart_rate_enabled {
+                        if let Some(ref target_id) = self.heart_rate_device_id {
+                            if matches!(
+                                &self.heart_rate_status,
+                                HeartRateStatus::Disconnected | HeartRateStatus::Error(_)
+                            ) && devices.iter().any(|d| d.id == *target_id)
+                            {
+                                log::info!("[HeartRate] Target device reappeared – reconnecting");
+                                self.next_heart_rate_reconnect = None;
+                                let _ = self
+                                    .heart_rate
+                                    .cmd_tx
+                                    .send(HeartRateCommand::Connect(target_id.clone()));
+                            }
+                        }
+                    }
+                    self.heart_rate_devices = devices;
+                }
                 HeartRateEvent::Status(status) => {
                     if !matches!(status, HeartRateStatus::Connected) {
                         self.current_heart_rate = None;
@@ -359,10 +357,14 @@ impl eframe::App for VrcMediaController {
                             HeartRateStatus::Disconnected | HeartRateStatus::Error(_)
                         )
                     {
+                        // Immediately scan for the device so we can
+                        // reconnect as soon as it reappears.  Fall-back
+                        // periodic scans use exponential backoff.
                         self.next_heart_rate_reconnect =
                             Some(std::time::Instant::now() + self.heart_rate_reconnect_delay);
                         self.heart_rate_reconnect_delay = (self.heart_rate_reconnect_delay * 2)
                             .min(std::time::Duration::from_secs(30));
+                        let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
                     }
                     self.heart_rate_status = status;
                 }
@@ -381,17 +383,22 @@ impl eframe::App for VrcMediaController {
             self.chatbox_dirty = true;
         }
 
+        // Periodic re-scan when waiting to reconnect.
+        // Only fire when we are genuinely disconnected — the deadline
+        // is cleared as soon as Connecting / Connected is observed.
         if self
             .next_heart_rate_reconnect
             .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            && matches!(
+                &self.heart_rate_status,
+                HeartRateStatus::Disconnected | HeartRateStatus::Error(_)
+            )
         {
-            self.next_heart_rate_reconnect = None;
-            if let Some(ref id) = self.heart_rate_device_id {
-                let _ = self
-                    .heart_rate
-                    .cmd_tx
-                    .send(HeartRateCommand::Connect(id.clone()));
-            }
+            self.next_heart_rate_reconnect =
+                Some(std::time::Instant::now() + self.heart_rate_reconnect_delay);
+            self.heart_rate_reconnect_delay =
+                (self.heart_rate_reconnect_delay * 2).min(std::time::Duration::from_secs(30));
+            let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
         }
 
         if self.chatbox_dirty {
@@ -824,11 +831,6 @@ fn main() {
     let tray = setup_tray_icon(&i18n, &config.get_language());
     let window_icon = load_window_icon();
 
-    // Channel for tray event handlers -> egui update loop.
-    // The sender is captured by OS-level callbacks registered in new();
-    // the receiver is polled in update().
-    let (tray_tx, tray_rx) = mpsc::unbounded_channel::<TrayCommand>();
-
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_min_inner_size([480.0, 280.0])
@@ -850,8 +852,6 @@ fn main() {
                 heart_rate_rx,
                 tray,
                 track_rx,
-                tray_rx,
-                tray_tx,
             )))
         }),
     );

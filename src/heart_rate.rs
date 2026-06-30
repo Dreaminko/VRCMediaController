@@ -98,6 +98,7 @@ mod windows_ble {
 
     const HEART_RATE_SERVICE: GUID = GUID::from_u128(0x0000180d_0000_1000_8000_00805f9b34fb);
     const HEART_RATE_MEASUREMENT: GUID = GUID::from_u128(0x00002a37_0000_1000_8000_00805f9b34fb);
+    const BODY_SENSOR_LOCATION: GUID = GUID::from_u128(0x00002a38_0000_1000_8000_00805f9b34fb);
 
     struct Connection {
         characteristic: GattCharacteristic,
@@ -110,6 +111,7 @@ mod windows_ble {
 
     impl Drop for Connection {
         fn drop(&mut self) {
+            log::info!("[HeartRate] Connection dropped – cleaning up");
             let _ = self
                 .characteristic
                 .RemoveValueChanged(self.value_changed_token);
@@ -130,13 +132,26 @@ mod windows_ble {
     ) {
         let mut connection: Option<Connection> = None;
         let _ = event_tx.send(HeartRateEvent::Status(HeartRateStatus::Disabled));
+        log::info!("[HeartRate] BLE runtime started");
 
         while let Some(command) = cmd_rx.recv().await {
             match command {
                 HeartRateCommand::Scan => {
+                    // Scanning while connected can disrupt the active BLE
+                    // link.  Skip the request — the caller will retry
+                    // when the connection drops.
+                    if connection.is_some() {
+                        log::debug!("[HeartRate] Scan skipped – already connected");
+                        continue;
+                    }
+                    log::info!("[HeartRate] Scan requested");
                     let _ = event_tx.send(HeartRateEvent::Status(HeartRateStatus::Scanning));
                     match scan_devices().await {
                         Ok(devices) => {
+                            log::info!(
+                                "[HeartRate] Scan complete – {} device(s) found",
+                                devices.len()
+                            );
                             let _ = event_tx.send(HeartRateEvent::Devices(devices));
                             let status = if connection.is_some() {
                                 HeartRateStatus::Connected
@@ -146,27 +161,32 @@ mod windows_ble {
                             let _ = event_tx.send(HeartRateEvent::Status(status));
                         }
                         Err(error) => {
+                            log::error!("[HeartRate] Scan failed: {}", error);
                             let _ = event_tx
                                 .send(HeartRateEvent::Status(HeartRateStatus::Error(error)));
                         }
                     }
                 }
                 HeartRateCommand::Connect(device_id) => {
+                    log::info!("[HeartRate] Connect requested (addr={})", device_id);
                     connection = None;
                     let _ = event_tx.send(HeartRateEvent::Status(HeartRateStatus::Connecting));
                     match connect(&device_id, event_tx.clone()).await {
                         Ok(active) => {
                             connection = Some(active);
+                            log::info!("[HeartRate] Connected successfully");
                             let _ =
                                 event_tx.send(HeartRateEvent::Status(HeartRateStatus::Connected));
                         }
                         Err(error) => {
+                            log::error!("[HeartRate] Connect failed: {}", error);
                             let _ = event_tx
                                 .send(HeartRateEvent::Status(HeartRateStatus::Error(error)));
                         }
                     }
                 }
                 HeartRateCommand::Disconnect => {
+                    log::info!("[HeartRate] Disconnect requested");
                     connection = None;
                     let _ = event_tx.send(HeartRateEvent::Status(HeartRateStatus::Disabled));
                 }
@@ -175,6 +195,7 @@ mod windows_ble {
     }
 
     async fn scan_devices() -> Result<Vec<HeartRateDevice>, String> {
+        log::debug!("[HeartRate] Creating BLE advertisement watcher");
         let watcher = BluetoothLEAdvertisementWatcher::new()
             .map_err(|e| format!("Failed to create BLE watcher: {}", format_error(e)))?;
         watcher
@@ -197,6 +218,7 @@ mod windows_ble {
         });
 
         let token = watcher.Received(&handler).map_err(format_error)?;
+        log::debug!("[HeartRate] Starting BLE scan (8 s)");
         watcher.Start().map_err(format_error)?;
         tokio::time::sleep(Duration::from_secs(8)).await;
         watcher.Stop().map_err(format_error)?;
@@ -204,6 +226,10 @@ mod windows_ble {
 
         let mut devices = Vec::new();
         let addrs: Vec<u64> = addresses.lock().unwrap().iter().copied().collect();
+        log::debug!(
+            "[HeartRate] Scan saw {} raw address(es), resolving names…",
+            addrs.len()
+        );
         for addr in addrs {
             // Use FromBluetoothAddressAsync to get a BluetoothLEDevice, but only
             // to resolve the name. The connect path uses the raw address and
@@ -212,11 +238,26 @@ mod windows_ble {
             let device = match BluetoothLEDevice::FromBluetoothAddressAsync(addr) {
                 Ok(op) => match op.get() {
                     Ok(d) => d,
-                    Err(_) => continue,
+                    Err(e) => {
+                        log::debug!(
+                            "[HeartRate] FromBluetoothAddressAsync({:#x}) get failed: {}",
+                            addr,
+                            format_error(e)
+                        );
+                        continue;
+                    }
                 },
-                Err(_) => continue,
+                Err(e) => {
+                    log::debug!(
+                        "[HeartRate] FromBluetoothAddressAsync({:#x}) failed: {}",
+                        addr,
+                        format_error(e)
+                    );
+                    continue;
+                }
             };
             let name = device.Name().map(|n| n.to_string()).unwrap_or_default();
+            log::debug!("[HeartRate] Resolved {:#x} → \"{}\"", addr, name);
             devices.push(HeartRateDevice {
                 id: addr.to_string(),
                 name: if name.is_empty() {
@@ -240,17 +281,61 @@ mod windows_ble {
             .parse()
             .map_err(|_| format!("Invalid Bluetooth address: {}", device_id))?;
 
+        log::debug!("[HeartRate] connect: resolving device {:#x}", addr);
         let device = BluetoothLEDevice::FromBluetoothAddressAsync(addr)
             .map_err(format_error)?
             .get()
             .map_err(format_error)?;
 
+        // Log pairing status — Pixel Watch may require pairing for a
+        // stable long-lived connection.
+        match device.DeviceInformation() {
+            Ok(info) => match info.Pairing() {
+                Ok(pairing) => {
+                    let paired = pairing.IsPaired().unwrap_or(false);
+                    log::info!(
+                        "[HeartRate] Device paired: {}, can-pair: {}",
+                        paired,
+                        pairing.CanPair().unwrap_or(false)
+                    );
+                    if !paired {
+                        log::warn!(
+                            "[HeartRate] Device is NOT paired. Pixel Watch may  \
+                                 require pairing to maintain the HR broadcast \
+                                 connection."
+                        );
+                    }
+                }
+                Err(e) => log::debug!("[HeartRate] Pairing info unavailable: {}", format_error(e)),
+            },
+            Err(e) => log::debug!(
+                "[HeartRate] DeviceInformation unavailable: {}",
+                format_error(e)
+            ),
+        }
+
+        // Subscribe to device-level connection changes for diagnostics.
+        {
+            let addr_str = format!("{:#x}", addr);
+            device
+                .ConnectionStatusChanged(&TypedEventHandler::new(move |_dev, _args| {
+                    log::info!(
+                        "[HeartRate] BluetoothLEDevice({}) ConnectionStatus changed",
+                        addr_str
+                    );
+                    Ok(())
+                }))
+                .ok();
+        }
+
+        log::debug!("[HeartRate] connect: discovering HR service");
         let services_result = device
             .GetGattServicesForUuidAsync(HEART_RATE_SERVICE)
             .map_err(format_error)?
             .get()
             .map_err(format_error)?;
         if services_result.Status().map_err(format_error)? != GattCommunicationStatus::Success {
+            log::warn!("[HeartRate] connect: HR service not found");
             return Err("Device does not expose Heart Rate service".to_string());
         }
         let services = services_result.Services().map_err(format_error)?;
@@ -258,12 +343,73 @@ mod windows_ble {
             .GetAt(0)
             .map_err(|_| "Heart Rate service was not found on device".to_string())?;
 
+        // Read Body Sensor Location (mandatory per Bluetooth HR Service spec).
+        // Some devices — including Pixel Watch — expect this read and will
+        // disconnect if the client skips it.
+        log::info!("[HeartRate] connect: reading Body Sensor Location");
+        let location_result = service
+            .GetCharacteristicsForUuidAsync(BODY_SENSOR_LOCATION)
+            .map_err(format_error)?
+            .get()
+            .map_err(format_error)?;
+        match location_result.Status() {
+            Ok(GattCommunicationStatus::Success) => match location_result.Characteristics() {
+                Ok(characteristics) => match characteristics.GetAt(0) {
+                    Ok(location_char) => match location_char.ReadValueAsync() {
+                        Ok(op) => match op.get() {
+                            Ok(read_result)
+                                if read_result.Status().map_err(format_error).ok()
+                                    == Some(GattCommunicationStatus::Success) =>
+                            {
+                                if let Ok(buf) = read_result.Value() {
+                                    let val = read_buffer(&buf)
+                                        .unwrap_or_default()
+                                        .first()
+                                        .copied()
+                                        .unwrap_or(0);
+                                    log::info!(
+                                        "[HeartRate] Body Sensor Location = {} ({})",
+                                        val,
+                                        body_sensor_location_name(val)
+                                    );
+                                }
+                            }
+                            _ => log::info!(
+                                "[HeartRate] Body Sensor Location read returned non-Success"
+                            ),
+                        },
+                        Err(e) => log::info!(
+                            "[HeartRate] Body Sensor Location ReadValueAsync failed: {}",
+                            format_error(e)
+                        ),
+                    },
+                    Err(_) => {
+                        log::info!("[HeartRate] Body Sensor Location characteristic list empty")
+                    }
+                },
+                Err(e) => log::info!(
+                    "[HeartRate] Body Sensor Location characteristics unavailable: {}",
+                    format_error(e)
+                ),
+            },
+            Ok(status) => log::info!(
+                "[HeartRate] Body Sensor Location discovery status: {:?}",
+                status
+            ),
+            Err(e) => log::info!(
+                "[HeartRate] Body Sensor Location status error: {}",
+                format_error(e)
+            ),
+        }
+
+        log::debug!("[HeartRate] connect: discovering HR Measurement characteristic");
         let result = service
             .GetCharacteristicsForUuidAsync(HEART_RATE_MEASUREMENT)
             .map_err(format_error)?
             .get()
             .map_err(format_error)?;
         if result.Status().map_err(format_error)? != GattCommunicationStatus::Success {
+            log::warn!("[HeartRate] connect: HR Measurement not found");
             return Err("Unable to access Heart Rate Measurement".to_string());
         }
         let characteristics = result.Characteristics().map_err(format_error)?;
@@ -271,9 +417,16 @@ mod windows_ble {
             .GetAt(0)
             .map_err(|_| "Heart Rate Measurement characteristic was not found".to_string())?;
 
+        log::debug!("[HeartRate] connect: configuring GATT session");
         let session = service.Session().map_err(format_error)?;
-        if session.CanMaintainConnection().unwrap_or(false) {
+        let can_maintain = session.CanMaintainConnection().unwrap_or(false);
+        log::debug!(
+            "[HeartRate] GattSession.CanMaintainConnection = {}",
+            can_maintain
+        );
+        if can_maintain {
             session.SetMaintainConnection(true).map_err(format_error)?;
+            log::info!("[HeartRate] SetMaintainConnection(true)");
         }
         let status_tx = event_tx.clone();
         let session_handler =
@@ -282,14 +435,18 @@ mod windows_ble {
                     if let Some(args) = args {
                         match args.Status()? {
                             GattSessionStatus::Active => {
+                                log::info!("[HeartRate] GattSession → Active");
                                 let _ = status_tx
                                     .send(HeartRateEvent::Status(HeartRateStatus::Connected));
                             }
                             GattSessionStatus::Closed => {
+                                log::info!("[HeartRate] GattSession → Closed");
                                 let _ = status_tx
                                     .send(HeartRateEvent::Status(HeartRateStatus::Disconnected));
                             }
-                            _ => {}
+                            other => {
+                                log::debug!("[HeartRate] GattSession → {:?}", other);
+                            }
                         }
                     }
                     Ok(())
@@ -308,9 +465,14 @@ mod windows_ble {
                     if let Ok(bytes) = read_buffer(&buffer) {
                         match parse_heart_rate_measurement(&bytes) {
                             Ok(bpm) => {
+                                log::info!("[HeartRate] Measurement: {} bpm", bpm);
                                 let _ = event_tx.send(HeartRateEvent::Measurement(bpm));
                             }
-                            Err(error) => log::warn!("[HeartRate] Invalid measurement: {}", error),
+                            Err(error) => log::warn!(
+                                "[HeartRate] Invalid measurement (len={}): {}",
+                                bytes.len(),
+                                error
+                            ),
                         }
                     }
                 }
@@ -320,6 +482,7 @@ mod windows_ble {
         let token = characteristic
             .ValueChanged(&handler)
             .map_err(format_error)?;
+        log::info!("[HeartRate] connect: writing CCCD (Notify)");
         let status = characteristic
             .WriteClientCharacteristicConfigurationDescriptorAsync(
                 GattClientCharacteristicConfigurationDescriptorValue::Notify,
@@ -328,9 +491,11 @@ mod windows_ble {
             .get()
             .map_err(format_error)?;
         if status != GattCommunicationStatus::Success {
+            log::error!("[HeartRate] connect: CCCD write rejected ({:?})", status);
             let _ = characteristic.RemoveValueChanged(token);
             return Err("The device rejected heart-rate notifications".to_string());
         }
+        log::info!("[HeartRate] CCCD Notify enabled – waiting for measurements");
 
         Ok(Connection {
             characteristic,
@@ -351,6 +516,21 @@ mod windows_ble {
 
     fn format_error(error: windows::core::Error) -> String {
         error.message().to_string()
+    }
+
+    /// Human-readable name for Body Sensor Location enum values
+    /// (Bluetooth SIG Assigned Numbers, Heart Rate Service).
+    fn body_sensor_location_name(val: u8) -> &'static str {
+        match val {
+            0 => "Other",
+            1 => "Chest",
+            2 => "Wrist",
+            3 => "Finger",
+            4 => "Hand",
+            5 => "Ear Lobe",
+            6 => "Foot",
+            _ => "Reserved",
+        }
     }
 }
 
