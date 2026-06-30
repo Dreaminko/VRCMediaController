@@ -1,6 +1,6 @@
 [package]
 name = "vrc-media-controller"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "VRChat Media Controller - Bridge Windows media playback with VRChat"
 
