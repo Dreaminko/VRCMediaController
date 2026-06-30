@@ -5,6 +5,8 @@
 const EMBEDDED_ICON: &[u8] = include_bytes!("../fav.ico");
 
 mod config;
+mod display;
+mod heart_rate;
 mod i18n;
 mod media;
 mod osc;
@@ -14,6 +16,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use config::ConfigManager;
+use display::compose_chatbox;
+use heart_rate::{
+    start_heart_rate_monitoring, HeartRateCommand, HeartRateDevice, HeartRateEvent,
+    HeartRateHandle, HeartRateStatus,
+};
 use i18n::I18n;
 use media::{start_media_monitoring, TrackEvent, TrackInfo};
 use osc::{start_osc, MediaCommand, OscCommand, OscHandle};
@@ -31,7 +38,6 @@ struct VrcMediaController {
 
     lang_code: String,
     current_track: String,
-    last_track: String,
     current_raw_track: Option<TrackInfo>,
     osc_ok: bool,
 
@@ -39,6 +45,21 @@ struct VrcMediaController {
     format_buffer: String,
     display_mode: String,
     display_duration: u32,
+
+    heart_rate: HeartRateHandle,
+    heart_rate_rx: mpsc::UnboundedReceiver<HeartRateEvent>,
+    heart_rate_enabled: bool,
+    heart_rate_devices: Vec<HeartRateDevice>,
+    heart_rate_status: HeartRateStatus,
+    heart_rate_device_id: Option<String>,
+    heart_rate_device_name: Option<String>,
+    heart_rate_format: String,
+    current_heart_rate: Option<(u16, std::time::Instant)>,
+    last_chatbox_text: Option<String>,
+    last_chatbox_send: Option<std::time::Instant>,
+    chatbox_dirty: bool,
+    next_heart_rate_reconnect: Option<std::time::Instant>,
+    heart_rate_reconnect_delay: std::time::Duration,
 
     // System tray
     has_tray: bool,
@@ -60,6 +81,8 @@ impl VrcMediaController {
         config: ConfigManager,
         i18n: I18n,
         osc: OscHandle,
+        heart_rate: HeartRateHandle,
+        heart_rate_rx: mpsc::UnboundedReceiver<HeartRateEvent>,
         tray: Option<TrayComponents>,
         track_rx: mpsc::UnboundedReceiver<TrackEvent>,
         tray_rx: mpsc::UnboundedReceiver<TrayCommand>,
@@ -73,6 +96,10 @@ impl VrcMediaController {
         let display_mode = config.get_display_mode();
         let display_duration = config.get_display_duration();
         let lang_code = config.get_language();
+        let heart_rate_enabled = config.get_heart_rate_enabled();
+        let heart_rate_device_id = config.get_heart_rate_device_id();
+        let heart_rate_device_name = config.get_heart_rate_device_name();
+        let heart_rate_format = config.get_heart_rate_format();
         let no_media_text = i18n.get(&lang_code, "no_media");
 
         let (tray_icon, has_tray) = match tray {
@@ -121,19 +148,42 @@ impl VrcMediaController {
             None => (None, false),
         };
 
+        if heart_rate_enabled {
+            if let Some(ref id) = heart_rate_device_id {
+                let _ = heart_rate
+                    .cmd_tx
+                    .send(HeartRateCommand::Connect(id.clone()));
+            } else {
+                let _ = heart_rate.cmd_tx.send(HeartRateCommand::Scan);
+            }
+        }
+
         Self {
             config,
             i18n,
             osc,
             lang_code,
             current_track: no_media_text,
-            last_track: String::new(),
             current_raw_track: None,
             osc_ok: false,
             chatbox_enabled,
             format_buffer,
             display_mode,
             display_duration,
+            heart_rate,
+            heart_rate_rx,
+            heart_rate_enabled,
+            heart_rate_devices: Vec::new(),
+            heart_rate_status: HeartRateStatus::Disabled,
+            heart_rate_device_id,
+            heart_rate_device_name,
+            heart_rate_format,
+            current_heart_rate: None,
+            last_chatbox_text: None,
+            last_chatbox_send: None,
+            chatbox_dirty: true,
+            next_heart_rate_reconnect: None,
+            heart_rate_reconnect_delay: std::time::Duration::from_secs(2),
             _tray_icon: tray_icon,
             tray_rx: if has_tray { Some(tray_rx) } else { None },
             has_tray,
@@ -173,6 +223,7 @@ impl VrcMediaController {
             Some(ref track) => self.format_track(track),
             None => self.no_media_text(),
         };
+        self.chatbox_dirty = true;
     }
 
     fn apply_language(&mut self) {
@@ -180,6 +231,56 @@ impl VrcMediaController {
             Some(ref track) => self.format_track(track),
             None => self.no_media_text(),
         };
+        self.chatbox_dirty = true;
+    }
+
+    fn active_heart_rate(&self) -> Option<u16> {
+        self.current_heart_rate.and_then(|(bpm, received)| {
+            (received.elapsed() <= std::time::Duration::from_secs(10)).then_some(bpm)
+        })
+    }
+
+    fn desired_chatbox_text(&self) -> Option<String> {
+        let media = self
+            .current_raw_track
+            .as_ref()
+            .map(|_| self.current_track.as_str());
+        let heart_rate = self
+            .heart_rate_enabled
+            .then(|| self.active_heart_rate())
+            .flatten();
+        compose_chatbox(media, heart_rate, &self.heart_rate_format)
+    }
+
+    fn update_chatbox(&mut self, force: bool) {
+        if !self.chatbox_enabled {
+            return;
+        }
+        let desired = self.desired_chatbox_text();
+        if desired == self.last_chatbox_text && !force {
+            self.chatbox_dirty = false;
+            return;
+        }
+        let rate_limit_elapsed = self
+            .last_chatbox_send
+            .map(|sent| sent.elapsed() >= std::time::Duration::from_secs(3))
+            .unwrap_or(true);
+        if !force && !rate_limit_elapsed {
+            self.chatbox_dirty = true;
+            return;
+        }
+
+        match desired.clone() {
+            Some(text) => {
+                let _ = self.osc.cmd_tx.send(OscCommand::SendChatbox(text));
+            }
+            None => {
+                let _ = self.osc.cmd_tx.send(OscCommand::ClearChatbox);
+            }
+        }
+        self.last_chatbox_text = desired;
+        self.last_chatbox_send = Some(std::time::Instant::now());
+        self.chatbox_dirty = false;
     }
 }
 
@@ -227,19 +328,61 @@ impl eframe::App for VrcMediaController {
             self.handle_track_update(info);
         }
 
-        // Track change -> OSC (only if chatbox output is enabled)
-        if self.current_track != self.last_track {
-            self.last_track = self.current_track.clone();
-            if self.chatbox_enabled {
-                if self.current_track != self.no_media_text() {
-                    let _ = self
-                        .osc
-                        .cmd_tx
-                        .send(OscCommand::SendChatbox(self.current_track.clone()));
-                } else {
-                    let _ = self.osc.cmd_tx.send(OscCommand::ClearChatbox);
+        while let Ok(event) = self.heart_rate_rx.try_recv() {
+            match event {
+                HeartRateEvent::Devices(devices) => self.heart_rate_devices = devices,
+                HeartRateEvent::Status(status) => {
+                    if !matches!(status, HeartRateStatus::Connected) {
+                        self.current_heart_rate = None;
+                        self.chatbox_dirty = true;
+                    }
+                    if matches!(status, HeartRateStatus::Connected) {
+                        self.next_heart_rate_reconnect = None;
+                        self.heart_rate_reconnect_delay = std::time::Duration::from_secs(2);
+                    } else if self.heart_rate_enabled
+                        && self.heart_rate_device_id.is_some()
+                        && matches!(
+                            status,
+                            HeartRateStatus::Disconnected | HeartRateStatus::Error(_)
+                        )
+                    {
+                        self.next_heart_rate_reconnect =
+                            Some(std::time::Instant::now() + self.heart_rate_reconnect_delay);
+                        self.heart_rate_reconnect_delay = (self.heart_rate_reconnect_delay * 2)
+                            .min(std::time::Duration::from_secs(30));
+                    }
+                    self.heart_rate_status = status;
+                }
+                HeartRateEvent::Measurement(bpm) => {
+                    self.current_heart_rate = Some((bpm, std::time::Instant::now()));
+                    self.chatbox_dirty = true;
                 }
             }
+        }
+
+        if self
+            .current_heart_rate
+            .is_some_and(|(_, received)| received.elapsed() > std::time::Duration::from_secs(10))
+        {
+            self.current_heart_rate = None;
+            self.chatbox_dirty = true;
+        }
+
+        if self
+            .next_heart_rate_reconnect
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            self.next_heart_rate_reconnect = None;
+            if let Some(ref id) = self.heart_rate_device_id {
+                let _ = self
+                    .heart_rate
+                    .cmd_tx
+                    .send(HeartRateCommand::Connect(id.clone()));
+            }
+        }
+
+        if self.chatbox_dirty {
+            self.update_chatbox(false);
         }
 
         // Build UI
@@ -264,10 +407,39 @@ impl VrcMediaController {
         let t_mode_timed = self.i18n.get(&self.lang_code, "display_mode_timed");
         let t_display_duration_label = self.i18n.get(&self.lang_code, "display_duration_label");
         let t_language = self.i18n.get(&self.lang_code, "language");
+        let t_heart_rate = self.i18n.get(&self.lang_code, "heart_rate");
+        let t_enable_heart_rate = self.i18n.get(&self.lang_code, "enable_heart_rate");
+        let t_scan_devices = self.i18n.get(&self.lang_code, "scan_devices");
+        let t_heart_rate_device = self.i18n.get(&self.lang_code, "heart_rate_device");
+        let t_heart_rate_format = self.i18n.get(&self.lang_code, "heart_rate_format");
 
         ui.vertical_centered(|ui| {
             ui.heading(&t_title);
         });
+        ui.add_space(8.0);
+
+        let heart_status = match &self.heart_rate_status {
+            HeartRateStatus::Disabled => self.i18n.get(&self.lang_code, "heart_rate_disabled"),
+            HeartRateStatus::Scanning => self.i18n.get(&self.lang_code, "heart_rate_scanning"),
+            HeartRateStatus::Disconnected => {
+                self.i18n.get(&self.lang_code, "heart_rate_disconnected")
+            }
+            HeartRateStatus::Connecting => self.i18n.get(&self.lang_code, "heart_rate_connecting"),
+            HeartRateStatus::Connected => self.i18n.get(&self.lang_code, "heart_rate_connected"),
+            HeartRateStatus::Error(error) => format!(
+                "{}: {}",
+                self.i18n.get(&self.lang_code, "heart_rate_error"),
+                error
+            ),
+        };
+        ui.label(heart_status);
+        if let Some(bpm) = self.active_heart_rate() {
+            ui.label(
+                egui::RichText::new(format!("❤️ {} bpm", bpm))
+                    .size(18.0)
+                    .strong(),
+            );
+        }
         ui.add_space(8.0);
 
         // OSC Status
@@ -303,11 +475,10 @@ impl VrcMediaController {
                     self.config.set_chatbox_enabled(enabled);
                     if !enabled {
                         let _ = self.osc.cmd_tx.send(OscCommand::ClearChatbox);
-                    } else if self.current_track != self.no_media_text() {
-                        let _ = self
-                            .osc
-                            .cmd_tx
-                            .send(OscCommand::SendChatbox(self.current_track.clone()));
+                        self.last_chatbox_text = None;
+                    } else {
+                        self.chatbox_dirty = true;
+                        self.update_chatbox(true);
                     }
                 }
 
@@ -323,12 +494,7 @@ impl VrcMediaController {
                     self.config.set_chatbox_format(&self.format_buffer);
                     if let Some(ref track) = self.current_raw_track {
                         self.current_track = self.format_track(track);
-                        if self.chatbox_enabled {
-                            let _ = self
-                                .osc
-                                .cmd_tx
-                                .send(OscCommand::SendChatbox(self.current_track.clone()));
-                        }
+                        self.chatbox_dirty = true;
                     }
                 }
 
@@ -375,6 +541,77 @@ impl VrcMediaController {
 
                 if mode_changed {
                     let _ = self.osc.cmd_tx.send(OscCommand::RefreshDisplay);
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.label(egui::RichText::new(&t_heart_rate).strong());
+                let mut hr_enabled = self.heart_rate_enabled;
+                if ui.checkbox(&mut hr_enabled, &t_enable_heart_rate).changed() {
+                    self.heart_rate_enabled = hr_enabled;
+                    self.config.set_heart_rate_enabled(hr_enabled);
+                    self.current_heart_rate = None;
+                    self.chatbox_dirty = true;
+                    if hr_enabled {
+                        if let Some(ref id) = self.heart_rate_device_id {
+                            let _ = self
+                                .heart_rate
+                                .cmd_tx
+                                .send(HeartRateCommand::Connect(id.clone()));
+                        } else {
+                            let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
+                        }
+                    } else {
+                        self.next_heart_rate_reconnect = None;
+                        let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Disconnect);
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(&t_heart_rate_device);
+                    let selected_name = self
+                        .heart_rate_device_name
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string());
+                    egui::ComboBox::from_id_salt("heart_rate_device")
+                        .selected_text(selected_name)
+                        .show_ui(ui, |ui| {
+                            for device in self.heart_rate_devices.clone() {
+                                let selected = self.heart_rate_device_id.as_deref()
+                                    == Some(device.id.as_str());
+                                if ui.selectable_label(selected, &device.name).clicked() {
+                                    self.heart_rate_device_id = Some(device.id.clone());
+                                    self.heart_rate_device_name = Some(device.name.clone());
+                                    self.config.set_heart_rate_device(
+                                        Some(device.id.clone()),
+                                        Some(device.name),
+                                    );
+                                    if self.heart_rate_enabled {
+                                        let _ = self
+                                            .heart_rate
+                                            .cmd_tx
+                                            .send(HeartRateCommand::Connect(device.id));
+                                    }
+                                }
+                            }
+                        });
+                    if ui.button(&t_scan_devices).clicked() {
+                        let _ = self.heart_rate.cmd_tx.send(HeartRateCommand::Scan);
+                    }
+                });
+
+                ui.label(&t_heart_rate_format);
+                if ui
+                    .add_sized(
+                        [ui.available_width(), 22.0],
+                        egui::TextEdit::singleline(&mut self.heart_rate_format),
+                    )
+                    .changed()
+                {
+                    self.config.set_heart_rate_format(&self.heart_rate_format);
+                    self.chatbox_dirty = true;
                 }
 
                 ui.add_space(12.0);
@@ -572,9 +809,11 @@ fn main() {
 
     let (media_tx, media_rx) = tokio::sync::mpsc::unbounded_channel::<MediaCommand>();
     let (track_tx, track_rx) = tokio::sync::mpsc::unbounded_channel::<TrackEvent>();
+    let (heart_rate_tx, heart_rate_rx) = tokio::sync::mpsc::unbounded_channel::<HeartRateEvent>();
 
     let osc = start_osc(config.clone(), media_tx.clone());
     start_media_monitoring(track_tx, media_rx);
+    let heart_rate = start_heart_rate_monitoring(heart_rate_tx);
 
     let tray = setup_tray_icon(&i18n, &config.get_language());
     let window_icon = load_window_icon();
@@ -586,7 +825,7 @@ fn main() {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([450.0, 440.0])
+            .with_inner_size([480.0, 620.0])
             .with_resizable(false)
             .with_icon(window_icon.unwrap_or_default()),
         ..Default::default()
@@ -601,6 +840,8 @@ fn main() {
                 config.clone(),
                 i18n,
                 osc,
+                heart_rate,
+                heart_rate_rx,
                 tray,
                 track_rx,
                 tray_rx,
